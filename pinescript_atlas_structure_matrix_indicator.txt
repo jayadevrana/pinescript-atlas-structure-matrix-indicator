@@ -1,0 +1,151 @@
+//@version=6
+indicator("Atlas Structure Matrix [Signal Forge]", shorttitle="Atlas Structure", overlay=true, max_boxes_count=250, max_labels_count=250, max_lines_count=250)
+
+groupStructure = "Structure"
+swingLen = input.int(5, "Swing Length", minval=2, group=groupStructure)
+atrLen = input.int(14, "ATR Length", minval=1, group=groupStructure)
+gapFactor = input.float(0.25, "Imbalance ATR Threshold", minval=0.05, step=0.05, group=groupStructure)
+gapExtend = input.int(40, "Imbalance Projection Bars", minval=5, maxval=200, group=groupStructure)
+maxImbalances = input.int(8, "Max Imbalances", minval=1, maxval=20, group=groupStructure)
+
+groupTF = "Multi-Timeframe Grid"
+tf1 = input.timeframe("60", "Fast Timeframe", group=groupTF)
+tf2 = input.timeframe("240", "Slow Timeframe", group=groupTF)
+tf3 = input.timeframe("D", "Macro Timeframe", group=groupTF)
+showDashboard = input.bool(true, "Show Grid", group=groupTF)
+showHTFLevels = input.bool(true, "Show Prev Day/Week Levels", group=groupTF)
+
+bullCore = color.rgb(0, 205, 176)
+bullGlow = color.rgb(137, 255, 224)
+bearCore = color.rgb(255, 93, 125)
+bearGlow = color.rgb(255, 188, 104)
+neutralCore = color.rgb(122, 134, 154)
+
+f_push_box(array<box> bucket, box item, int keep) =>
+    array.push(bucket, item)
+    if array.size(bucket) > keep
+        box.delete(array.shift(bucket))
+
+f_push_label(array<label> bucket, label item, int keep) =>
+    array.push(bucket, item)
+    if array.size(bucket) > keep
+        label.delete(array.shift(bucket))
+
+f_tf_state(string tf) =>
+    tfClose = request.security(syminfo.tickerid, tf, close)
+    tfEma = request.security(syminfo.tickerid, tf, ta.ema(close, 55))
+    tfRsi = request.security(syminfo.tickerid, tf, ta.rsi(close, 14))
+    score = (tfClose > tfEma ? 1 : -1) + (tfRsi > 50.0 ? 1 : -1)
+    [score, tfRsi]
+
+atr = ta.atr(atrLen)
+ph = ta.pivothigh(high, swingLen, swingLen)
+pl = ta.pivotlow(low, swingLen, swingLen)
+
+var float prevPivotHigh = na
+var float prevPivotLow = na
+var float lastSwingHigh = na
+var float lastSwingLow = na
+var int lastSwingHighBar = na
+var int lastSwingLowBar = na
+var string lastStructure = "Waiting"
+
+var array<box> imbalances = array.new_box()
+var array<label> structureTags = array.new_label()
+var table grid = table.new(position.bottom_left, 4, 5, bgcolor=color.new(color.black, 58), frame_color=color.new(color.white, 70), frame_width=1)
+
+if not na(ph)
+    prevPivotHigh := lastSwingHigh
+    lastSwingHigh := ph
+    lastSwingHighBar := bar_index - swingLen
+    pivotTag = na(prevPivotHigh) ? "H" : ph > prevPivotHigh ? "HH" : "LH"
+    f_push_label(structureTags, label.new(x=lastSwingHighBar, y=ph + atr * 0.25, text=pivotTag, style=label.style_label_down, color=bearGlow, textcolor=color.black, size=size.tiny), 60)
+    lastStructure := pivotTag
+
+if not na(pl)
+    prevPivotLow := lastSwingLow
+    lastSwingLow := pl
+    lastSwingLowBar := bar_index - swingLen
+    pivotTag = na(prevPivotLow) ? "L" : pl > prevPivotLow ? "HL" : "LL"
+    f_push_label(structureTags, label.new(x=lastSwingLowBar, y=pl - atr * 0.25, text=pivotTag, style=label.style_label_up, color=bullGlow, textcolor=color.black, size=size.tiny), 60)
+    lastStructure := pivotTag
+
+equilibrium = na(lastSwingHigh) or na(lastSwingLow) ? na : (lastSwingHigh + lastSwingLow) * 0.5
+hasRange = not na(equilibrium)
+bullBos = not na(lastSwingHigh) and ta.crossover(close, lastSwingHigh)
+bearBos = not na(lastSwingLow) and ta.crossunder(close, lastSwingLow)
+
+if bullBos
+    f_push_label(structureTags, label.new(x=bar_index, y=high + atr * 0.40, text="BOS+", style=label.style_label_down, color=bullCore, textcolor=color.black, size=size.small), 60)
+    lastStructure := "Bull BOS"
+
+if bearBos
+    f_push_label(structureTags, label.new(x=bar_index, y=low - atr * 0.40, text="BOS-", style=label.style_label_up, color=bearCore, textcolor=color.black, size=size.small), 60)
+    lastStructure := "Bear BOS"
+
+bullGap = low > high[2] and low - high[2] > atr * gapFactor
+bearGap = high < low[2] and low[2] - high > atr * gapFactor
+
+if bullGap
+    f_push_box(imbalances, box.new(left=bar_index - 2, top=low, right=bar_index + gapExtend, bottom=high[2], extend=extend.right, bgcolor=color.new(bullCore, 88), border_color=color.new(bullGlow, 0), text="Bull FVG", text_color=color.white), maxImbalances)
+
+if bearGap
+    f_push_box(imbalances, box.new(left=bar_index - 2, top=low[2], right=bar_index + gapExtend, bottom=high, extend=extend.right, bgcolor=color.new(bearCore, 88), border_color=color.new(bearGlow, 0), text="Bear FVG", text_color=color.white), maxImbalances)
+
+[tf1Score, tf1Rsi] = f_tf_state(tf1)
+[tf2Score, tf2Rsi] = f_tf_state(tf2)
+[tf3Score, tf3Rsi] = f_tf_state(tf3)
+
+bullVotes = (tf1Score > 0 ? 1 : 0) + (tf2Score > 0 ? 1 : 0) + (tf3Score > 0 ? 1 : 0)
+bearVotes = 3 - bullVotes
+
+longSignal = hasRange and bullBos and close > equilibrium and bullVotes >= 2
+shortSignal = hasRange and bearBos and close < equilibrium and bearVotes >= 2
+
+pdh = request.security(syminfo.tickerid, "D", high[1])
+pdl = request.security(syminfo.tickerid, "D", low[1])
+pwh = request.security(syminfo.tickerid, "W", high[1])
+pwl = request.security(syminfo.tickerid, "W", low[1])
+
+rangeHighPlot = plot(lastSwingHigh, "Active Swing High", color=color.new(bearGlow, 0), linewidth=2, style=plot.style_linebr)
+rangeLowPlot = plot(lastSwingLow, "Active Swing Low", color=color.new(bullGlow, 0), linewidth=2, style=plot.style_linebr)
+eqPlot = plot(equilibrium, "Equilibrium", color=color.new(color.white, 35), linewidth=1, style=plot.style_linebr)
+fill(rangeHighPlot, eqPlot, color=color.new(bearCore, 92))
+fill(eqPlot, rangeLowPlot, color=color.new(bullCore, 92))
+
+plot(showHTFLevels ? pdh : na, "PDH", color=color.new(bearCore, 70), style=plot.style_linebr)
+plot(showHTFLevels ? pdl : na, "PDL", color=color.new(bullCore, 70), style=plot.style_linebr)
+plot(showHTFLevels ? pwh : na, "PWH", color=color.new(bearGlow, 75), style=plot.style_linebr)
+plot(showHTFLevels ? pwl : na, "PWL", color=color.new(bullGlow, 75), style=plot.style_linebr)
+
+biasTint = na(equilibrium) ? color.new(neutralCore, 55) : close > equilibrium ? color.new(bullCore, 45) : color.new(bearCore, 45)
+barcolor(biasTint)
+plotshape(longSignal, title="Atlas Long", style=shape.triangleup, location=location.belowbar, color=bullGlow, size=size.tiny, text="A", textcolor=color.black)
+plotshape(shortSignal, title="Atlas Short", style=shape.triangledown, location=location.abovebar, color=bearGlow, size=size.tiny, text="A", textcolor=color.black)
+
+if barstate.islast and showDashboard
+    table.cell(grid, 0, 0, "ATLAS", text_color=color.white, bgcolor=color.new(color.black, 0))
+    table.cell(grid, 1, 0, tf1, text_color=color.white, bgcolor=color.new(color.black, 0))
+    table.cell(grid, 2, 0, tf2, text_color=color.white, bgcolor=color.new(color.black, 0))
+    table.cell(grid, 3, 0, tf3, text_color=color.white, bgcolor=color.new(color.black, 0))
+    table.cell(grid, 0, 1, "Bias", text_color=color.white)
+    table.cell(grid, 1, 1, tf1Score > 0 ? "Bull" : "Bear", text_color=tf1Score > 0 ? bullGlow : bearGlow)
+    table.cell(grid, 2, 1, tf2Score > 0 ? "Bull" : "Bear", text_color=tf2Score > 0 ? bullGlow : bearGlow)
+    table.cell(grid, 3, 1, tf3Score > 0 ? "Bull" : "Bear", text_color=tf3Score > 0 ? bullGlow : bearGlow)
+    table.cell(grid, 0, 2, "RSI", text_color=color.white)
+    table.cell(grid, 1, 2, str.tostring(tf1Rsi, "#.0"), text_color=tf1Rsi > 50.0 ? bullGlow : bearGlow)
+    table.cell(grid, 2, 2, str.tostring(tf2Rsi, "#.0"), text_color=tf2Rsi > 50.0 ? bullGlow : bearGlow)
+    table.cell(grid, 3, 2, str.tostring(tf3Rsi, "#.0"), text_color=tf3Rsi > 50.0 ? bullGlow : bearGlow)
+    table.cell(grid, 0, 3, "Score", text_color=color.white)
+    table.cell(grid, 1, 3, str.tostring(tf1Score), text_color=tf1Score > 0 ? bullGlow : bearGlow)
+    table.cell(grid, 2, 3, str.tostring(tf2Score), text_color=tf2Score > 0 ? bullGlow : bearGlow)
+    table.cell(grid, 3, 3, str.tostring(tf3Score), text_color=tf3Score > 0 ? bullGlow : bearGlow)
+    table.cell(grid, 0, 4, "Local", text_color=color.white)
+    table.cell(grid, 1, 4, lastStructure, text_color=color.white)
+    table.cell(grid, 2, 4, bullVotes >= 2 ? "Aligned" : bearVotes >= 2 ? "Aligned" : "Mixed", text_color=bullVotes >= 2 ? bullGlow : bearVotes >= 2 ? bearGlow : neutralCore)
+    table.cell(grid, 3, 4, na(equilibrium) ? "No Range" : close > equilibrium ? "Discount" : "Premium", text_color=na(equilibrium) ? neutralCore : close > equilibrium ? bullGlow : bearGlow)
+
+if barstate.islast and not showDashboard
+    for row = 0 to 4
+        for col = 0 to 3
+            table.cell(grid, col, row, "", bgcolor=color.new(color.black, 100))
